@@ -1,3 +1,6 @@
+import io.prometheus.client.Gauge
+import io.prometheus.client.Histogram
+import io.prometheus.client.exporter.HTTPServer
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -7,32 +10,71 @@ import kotlin.random.Random
 var stop = false
 var sensors_stop = false
 
+val sensors_count = Gauge.build().name("count_of_sensors").help("Count of sensors").register()
+val sensors_queue = Gauge.build().name("sensor_queue_len").help("Len of sensors queue").register()
+val logs_queue = Gauge.build().name("logs_queue_len").help("Len of logs queue").register()
+val sensors_time = Histogram.build().name("sensors_time").help("sensors time").register()
+
 fun main() {
-    Thread.sleep(10000)
+    val server = HTTPServer.Builder().withPort(1234).build()
+    Thread.sleep(1000)
     val loggingQueue = ArrayBlockingQueue<LoggerData>(1000, true)
     val sensorQueue = ArrayBlockingQueue<SensorData>(1000, true)
+
     Logging(loggingQueue).start()
     Host(sensorQueue, loggingQueue).start()
-    for (i in 1..1000) {
-        val x = TempSensor(sensorQueue, i, Random.nextLong(1, 100))
-        x.isDaemon = true
-        x.start()
-    }
-    Thread.sleep(5000)
+    runSensors(1000,sensorQueue)
+
+//    Thread.sleep(5000)//work for sum time
+    waitForQueue(loggingQueue, sensorQueue)
+    waitForSensors()
+    stopAll(loggingQueue, sensorQueue)
+    Thread.sleep(100)
+    server.close()
+    println("end of main")
+}
+
+private fun stopAll(loggingQueue: ArrayBlockingQueue<LoggerData>, sensorQueue: ArrayBlockingQueue<SensorData>) {
     sensors_stop = true
+    waitForQueue(loggingQueue, sensorQueue)
+    stop = true
+}
+
+private fun waitForQueue(
+    loggingQueue: ArrayBlockingQueue<LoggerData>,
+    sensorQueue: ArrayBlockingQueue<SensorData>
+) {
     while (loggingQueue.isNotEmpty() || sensorQueue.isNotEmpty()) {
         println("Waiting for queue to empty: loggingQueue=${loggingQueue.count()}  sensorQueue=${sensorQueue.count()}")
         Thread.sleep(1000)
     }
-    stop = true
-    println("end of main")
 }
+
+private fun waitForSensors(){
+    while (sensors_count.get()>0){
+    }
+}
+
+private fun runSensors(count:Int, queue: ArrayBlockingQueue<SensorData>, isDeamon:Boolean=true, maxAlive:Int=500){
+    var iter=0
+    while (iter<=count) {
+        if (sensors_count.get()>maxAlive){
+            continue
+        }
+        val ts = TempSensor(queue, iter, Random.nextLong(1, 1000), Random.nextInt(1, 100))
+        ts.isDaemon = isDeamon
+        ts.start()
+        iter+=1
+        Thread.sleep(1)
+    }
+}
+
 
 class Logging(lq: ArrayBlockingQueue<LoggerData>) : Thread() {
     val loggingQueue = lq
     val sdf = SimpleDateFormat("dd/M/yyyy hh:mm:ss")
     val file = File("log.txt").bufferedWriter()
-    public override fun run() {
+    override fun run() {
         name = "LoggingThread"
         var lg: LoggerData
         var logMassege: String
@@ -41,12 +83,13 @@ class Logging(lq: ArrayBlockingQueue<LoggerData>) : Thread() {
                 continue
             }
             lg = loggingQueue.take()
-            lg.frezzee()
+            logs_queue.dec()
+            lg.freeze()
             logMassege =
-                "${lg.createLog()}time=${lg.freezzeeTime} loggingQueue=${loggingQueue.count()} || ${sdf.format(Date())}\n"
+                "${lg.createLog(loggingQueue)} || ${sdf.format(Date())}\n"
             print(logMassege)
             file.write(logMassege)
-            Thread.sleep(1)
+            Thread.sleep(1)//to make logger work slow
         }
         file.close()
         println("Terning off logger")
@@ -56,7 +99,7 @@ class Logging(lq: ArrayBlockingQueue<LoggerData>) : Thread() {
 class Host(sq: ArrayBlockingQueue<SensorData>, lq: ArrayBlockingQueue<LoggerData>) : Thread() {
     val sensorQueue = sq
     val loggingQueue = lq
-    public override fun run() {
+    override fun run() {
         name = "HostThread"
         var sd: SensorData
         var lg: LoggerData
@@ -65,24 +108,31 @@ class Host(sq: ArrayBlockingQueue<SensorData>, lq: ArrayBlockingQueue<LoggerData
                 continue
             }
             sd = sensorQueue.take()
-            sd.frezzee()
+            sensors_queue.dec()
+            sd.freeze()
             lg = LoggerData(sd, sensorQueue.count())
             loggingQueue.put(lg)
+            logs_queue.inc()
         }
         println("Terning off host")
     }
 }
 
-class TempSensor(sq: ArrayBlockingQueue<SensorData>, id: Int, ping: Long = 1000) : Thread() {
+class TempSensor(sq: ArrayBlockingQueue<SensorData>, id: Int, ping: Long = 1000, lifecicle:Int=-1) : Thread() {
     val sensorQueue = sq
     val id = id
     val p = ping
-    public override fun run() {
+    var lc=lifecicle
+    override fun run() {
+        sensors_count.inc()
         name = "Sensor:$id"
-        while (!sensors_stop) {
+        while (!sensors_stop && lc!=0) {
             sensorQueue.put(SensorData(id, Random.nextInt(1, 100)))
+            sensors_queue.inc()
             Thread.sleep(p)
+            lc-=1
         }
+        sensors_count.dec()
         println("Terning off sensor:$id")
     }
 }
@@ -91,13 +141,19 @@ class TempSensor(sq: ArrayBlockingQueue<SensorData>, id: Int, ping: Long = 1000)
 
 
 open class ThreadData(val timestamp: Long = System.currentTimeMillis()) {
-    var freezzeeTime: Long = -1
-    fun frezzee() {
-        freezzeeTime = System.currentTimeMillis() - timestamp
+    var freezeTime: Long = -1
+    open fun freeze() {
+        freezeTime = System.currentTimeMillis() - timestamp
     }
 }
-data class SensorData(val id: Int, val temp: Int) : ThreadData()
+data class SensorData(val id: Int, val temp: Int) : ThreadData(){
+    val timest=sensors_time.startTimer()
+    override fun freeze() {
+        timest.observeDuration()
+        super.freeze()
+    }
+}
 data class LoggerData(val sensorData: SensorData, val sensorLen: Int) : ThreadData() {
-    fun createLog(): String =
-        "Receive sensor=${sensorData.id} value=${sensorData.temp} time=${sensorData.freezzeeTime} sensorQueue=${sensorLen} | "
+    fun createLog(lq:ArrayBlockingQueue<LoggerData>): String =
+        "Sensor ${sensorData.id} send value=${sensorData.temp} time=${sensorData.freezeTime} sensorQueue=${sensorLen} | time=${freezeTime} loggingQueue=${lq.count()}"
 }

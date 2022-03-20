@@ -21,7 +21,7 @@ fun main() {
     val loggingQueue = ArrayBlockingQueue<LoggerData>(1000, true)
     val sensorQueue = ArrayBlockingQueue<SensorData>(1000, true)
 
-    Logging(loggingQueue).start()
+    Logger(loggingQueue).start()
     Host(sensorQueue, loggingQueue).start()
     runSensors(1000,sensorQueue)
 
@@ -61,7 +61,7 @@ private fun runSensors(count:Int, queue: ArrayBlockingQueue<SensorData>, isDeamo
         if (sensors_count.get()>maxAlive){
             continue
         }
-        val ts = TempSensor(queue, iter, Random.nextLong(1, 1000), Random.nextInt(1, 100))
+        val ts = Sensor(queue, iter, Random.nextLong(1, 1000), Random.nextInt(1, 100))
         ts.isDaemon = isDeamon
         ts.start()
         iter+=1
@@ -70,7 +70,7 @@ private fun runSensors(count:Int, queue: ArrayBlockingQueue<SensorData>, isDeamo
 }
 
 
-class Logging(lq: ArrayBlockingQueue<LoggerData>) : Thread() {
+class Logger(lq: ArrayBlockingQueue<LoggerData>) : Thread() {
     val loggingQueue = lq
     val sdf = SimpleDateFormat("dd/M/yyyy hh:mm:ss")
     val file = File("log.txt").bufferedWriter()
@@ -118,7 +118,7 @@ class Host(sq: ArrayBlockingQueue<SensorData>, lq: ArrayBlockingQueue<LoggerData
     }
 }
 
-class TempSensor(sq: ArrayBlockingQueue<SensorData>, id: Int, ping: Long = 1000, lifecicle:Int=-1) : Thread() {
+class Sensor(sq: ArrayBlockingQueue<SensorData>, id: Int, ping: Long = 1000, lifecicle:Int=-1) : Thread() {
     val sensorQueue = sq
     val id = id
     val p = ping
@@ -155,5 +155,5 @@ data class SensorData(val id: Int, val temp: Int) : ThreadData(){
 }
 data class LoggerData(val sensorData: SensorData, val sensorLen: Int) : ThreadData() {
     fun createLog(lq:ArrayBlockingQueue<LoggerData>): String =
-        "Sensor ${sensorData.id} send value=${sensorData.temp} time=${sensorData.freezeTime} sensorQueue=${sensorLen} | time=${freezeTime} loggingQueue=${lq.count()}"
+        "Sensor id ${sensorData.id} send value=${sensorData.temp} s_time=${sensorData.freezeTime} sensorQueue=${sensorLen} | l_time=${freezeTime} loggingQueue=${lq.count()}"
 }
